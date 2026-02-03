@@ -68,31 +68,33 @@ int receive(void __rte_unused *arg){
 }
 
 
-int transmit_ipv4(void __rte_unused *arg){
-    int num_tx=0;
+int transmit_ipv4(void *arg){
+    struct rte_event out;
 
-    struct rte_event out; 
-    while(1){
+    while (1) {
+        int ret = rte_event_dequeue_burst(
+            DEV_ID, IPV4_CONS_PORT_ID, &out, 1, 0);
 
-        int ret=rte_event_dequeue_burst(DEV_ID, IPV4_CONS_PORT_ID, &out, 1, 0);
-        
-        if(ret<1){
-            //printf("dequeue for ipv4 failed\n");
+        if (ret < 1)
             continue;
-        }
 
+        struct rte_mbuf *packet = out.mbuf;
 
-        struct rte_mbuf* packet = out.mbuf;
-        printf("\n");
         printf("received mbuf from ipv4 queue\n");
         parsing_logic(packet, PARSE_PACKET);
-        printf("\n");
-        num_tx++;
+        
+        // release and enqueue it back (not required in parallel)
+        out.op = RTE_EVENT_OP_RELEASE;
+        ret = rte_event_enqueue_burst(
+            DEV_ID, IPV4_CONS_PORT_ID, &out, 1);
+        if (ret < 1)
+            printf("failed to release ipv4 event\n");
 
+
+        rte_pktmbuf_free(packet);
     }
-
-    return num_tx;
 }
+
 
 int drop_ipv6(void __rte_unused *arg){
 
@@ -107,9 +109,17 @@ int drop_ipv6(void __rte_unused *arg){
             continue;
         }
 
-
-        struct rte_mbuf* packet = out.mbuf;
         printf("received mbuf from ipv6 queue, now dropping\n");
+
+        // release and queue it back (not required in parallel)
+        struct rte_mbuf* packet = out.mbuf;
+        out.op=RTE_EVENT_OP_RELEASE;
+        ret=rte_event_enqueue_burst(DEV_ID, IPV6_CONS_PORT_ID, &out, 1);
+        if(ret<1){
+            printf("some problem while trying to enqueue the released event in ipv6 drop\n");
+        }
+
+
         rte_pktmbuf_free(packet);
         num_drops++;
     }

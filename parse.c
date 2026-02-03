@@ -7,13 +7,13 @@ extern struct rte_ring* parse_ring;
 extern struct rte_ring* tx_ring;
 
 
-void print_ipv4_address(uint32_t addr, int offset){
+void print_ipv4_address(uint32_t addr){
 
   printf("%u.%u.%u.%u\n", (addr>>24)&(0xFF),(addr>>16)&(0xFF),(addr>>8)&(0xFF),(addr)&(0xFF));
 
 }
 
-void parse_TCP(struct rte_tcp_hdr* tcp_hdr, int offset){
+void parse_TCP(struct rte_tcp_hdr* tcp_hdr){
   printf("the source port is : %u\n", rte_be_to_cpu_16(tcp_hdr->src_port));
   printf("the destination port is : %u\n", rte_be_to_cpu_16(tcp_hdr->dst_port));
   printf("TCP sequence number: %u\n", rte_be_to_cpu_32(tcp_hdr->sent_seq));
@@ -21,7 +21,7 @@ void parse_TCP(struct rte_tcp_hdr* tcp_hdr, int offset){
   return;
 }
 
-void parse_UDP(struct rte_udp_hdr* udp_hdr, int offset){
+void parse_UDP(struct rte_udp_hdr* udp_hdr){
   printf("the source port is %u\n", rte_be_to_cpu_16(udp_hdr->src_port));
   printf("the destination port is %u\n", rte_be_to_cpu_16(udp_hdr->dst_port));
   return;
@@ -29,9 +29,9 @@ void parse_UDP(struct rte_udp_hdr* udp_hdr, int offset){
 
 void ipv4_parsing(struct rte_ipv4_hdr* ipv4_hdr,struct rte_mbuf* packet, int offset){
     printf("source address : ");
-    print_ipv4_address(rte_be_to_cpu_32(ipv4_hdr->src_addr),offset);
+    print_ipv4_address(rte_be_to_cpu_32(ipv4_hdr->src_addr));
     printf("destination address :");
-    print_ipv4_address(rte_be_to_cpu_32(ipv4_hdr->dst_addr),offset);
+    print_ipv4_address(rte_be_to_cpu_32(ipv4_hdr->dst_addr));
 
 
     //offset+= sizeof(struct rte_ipv4_hdr);
@@ -43,12 +43,12 @@ void ipv4_parsing(struct rte_ipv4_hdr* ipv4_hdr,struct rte_mbuf* packet, int off
     if(ipv4_hdr->next_proto_id == IPPROTO_TCP){
       printf("TCP\n");
       struct rte_tcp_hdr* tcp_hdr = rte_pktmbuf_mtod_offset(packet, struct rte_tcp_hdr* , offset);
-      parse_TCP(tcp_hdr,offset);
+      parse_TCP(tcp_hdr);
     }
     else if(ipv4_hdr->next_proto_id == IPPROTO_UDP){
       printf("UDP\n");
       struct rte_udp_hdr* udp_hdr = rte_pktmbuf_mtod_offset(packet, struct rte_udp_hdr* , offset);
-      parse_UDP(udp_hdr,offset);
+      parse_UDP(udp_hdr);
     }
     else{
       printf("unknown\n");
@@ -76,12 +76,12 @@ void ipv6_parsing(struct rte_ipv6_hdr* ipv6_hdr, struct rte_mbuf* packet, int of
     if(ipv6_hdr->proto == IPPROTO_TCP){
       printf("TCP\n");
       struct rte_tcp_hdr* tcp_hdr = rte_pktmbuf_mtod_offset(packet, struct rte_tcp_hdr* , offset);
-      parse_TCP(tcp_hdr,offset);
+      parse_TCP(tcp_hdr);
     }
     else if(ipv6_hdr->proto == IPPROTO_UDP){
       printf("UDP\n");
       struct rte_udp_hdr* udp_hdr = rte_pktmbuf_mtod_offset(packet, struct rte_udp_hdr* , offset);
-      parse_UDP(udp_hdr,offset);
+      parse_UDP(udp_hdr);
     }
     else{
       printf("unknown\n");
@@ -89,9 +89,23 @@ void ipv6_parsing(struct rte_ipv6_hdr* ipv6_hdr, struct rte_mbuf* packet, int of
 }
 
 int parsing_logic(struct rte_mbuf* packet, bool type_finder){
+  int ip_type=0;
+  
   int offset=0;
-
   struct rte_ether_hdr* eth_hdr = rte_pktmbuf_mtod(packet, struct rte_ether_hdr*);
+
+  if(eth_hdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)){
+    ip_type=4;
+  }
+  else if(eth_hdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV6)){
+    ip_type=6;
+  }
+
+
+  if(type_finder==1){
+    return ip_type;
+  }
+
 
   printf("Source MAC address:\n");
   for(int i=0; i<RTE_ETHER_ADDR_LEN; i++){
@@ -111,18 +125,12 @@ int parsing_logic(struct rte_mbuf* packet, bool type_finder){
   }
   printf("\n");
 
-  int ip_type=0;
-  if(eth_hdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)){
+  if(ip_type==4){
     printf("IP : IPV4\n");
-    ip_type=4;
   }
-  else if(eth_hdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV6)){
+  else{
     printf("IP: IPV6\n");
-    ip_type=6;
   }
-
-  if(type_finder)return ip_type;
-
 
   offset+=RTE_ETHER_HDR_LEN;
 

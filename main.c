@@ -25,8 +25,8 @@
 #define FIND_IP_TYPE 1
 #define PARSE_PACKET 0
 
-int receive(void* arg){
-    int num_rx;
+int receive(void __rte_unused *arg){
+    int num_rx=0;
 
     struct rte_mbuf* buf[32];
 
@@ -35,12 +35,14 @@ int receive(void* arg){
 
         if(received==0)continue;
 
+        num_rx+=received;
 
         for(int i=0; i<received; i++){
             struct rte_event event={0};
-            event.event_type = RTE_EVENT_TYPE_CPU;
+            event.event_type =  RTE_EVENT_TYPE_ETHDEV;
             event.sched_type = RTE_SCHED_TYPE_PARALLEL;
-            event.mbuf = buf[i];  
+            event.mbuf = buf[i]; 
+            event.op = RTE_EVENT_OP_NEW; 
             
             int ip = parsing_logic(buf[i],FIND_IP_TYPE);
             if(ip==4){
@@ -56,6 +58,7 @@ int receive(void* arg){
                 //continue
                 rte_pause();
             }
+            printf("event enqueued\n");
         }
         
     }
@@ -65,46 +68,50 @@ int receive(void* arg){
 }
 
 
-int transmit_ipv4(void* arg){
-    int num_tx;
+int transmit_ipv4(void __rte_unused *arg){
+    int num_tx=0;
 
+    struct rte_event out; 
     while(1){
 
-        struct rte_event* out; 
-        if(rte_event_dequeue_burst(DEV_ID, IPV4_CONS_PORT_ID, out, 1, 0)==0){
-            //printf("some failure in dequeue of event\n");
-            //continue;
-            rte_pause();
+        int ret=rte_event_dequeue_burst(DEV_ID, IPV4_CONS_PORT_ID, &out, 1, 0);
+        
+        if(ret<1){
+            //printf("dequeue for ipv4 failed\n");
+            continue;
         }
 
 
-        struct rte_mbuf* packet = out->mbuf;
+        struct rte_mbuf* packet = out.mbuf;
+        printf("\n");
         printf("received mbuf from ipv4 queue\n");
         parsing_logic(packet, PARSE_PACKET);
-
+        printf("\n");
+        num_tx++;
 
     }
 
     return num_tx;
 }
 
-int drop_ipv6(void* arg){
-    int num_drops;
+int drop_ipv6(void __rte_unused *arg){
 
+    int num_drops=0;
+
+    struct rte_event out; 
     while(1){
 
-        struct rte_event* out; 
-        if(rte_event_dequeue_burst(DEV_ID, IPV6_CONS_PORT_ID, out, 1, 0)==0){
-            //printf("some failure in dequeue of event\n");
-            //continue;
-            rte_pause();
+        int ret=rte_event_dequeue_burst(DEV_ID, IPV6_CONS_PORT_ID, &out, 1, 0);
+
+        if(ret<1){
+            continue;
         }
 
 
-        struct rte_mbuf* packet = out->mbuf;
+        struct rte_mbuf* packet = out.mbuf;
         printf("received mbuf from ipv6 queue, now dropping\n");
         rte_pktmbuf_free(packet);
-
+        num_drops++;
     }
 
 
@@ -135,6 +142,7 @@ int main(int argc, char** argv){
     econfig.nb_event_port_dequeue_depth=32;
     econfig.nb_event_port_enqueue_depth=32;
     econfig.nb_event_queue_flows=1024;     // each packet will have sched type as parallel anyway
+    econfig.nb_events_limit=4096;
 
     ret = rte_event_dev_configure(DEV_ID, &econfig);
     if(ret<0){
@@ -170,26 +178,28 @@ int main(int argc, char** argv){
 
 
     // port setup
-    struct rte_event_port_conf receive_port;
-    ret=rte_event_port_default_conf_get(DEV_ID, PROD_PORT_ID, &receive_port);
-    if(ret<0){
-        printf("error fetching default config for port receive\n");
-    }
-    receive_port.event_port_cfg= RTE_EVENT_PORT_CFG_HINT_PRODUCER;
+    struct rte_event_port_conf receive_port = {
+        .new_event_threshold = 1024,
+        .dequeue_depth = 32,
+        .enqueue_depth = 32,
+        .event_port_cfg = RTE_EVENT_PORT_CFG_HINT_PRODUCER
+    };
 
-    struct rte_event_port_conf ipv4_port;
-    ret=rte_event_port_default_conf_get(DEV_ID, IPV4_CONS_PORT_ID, &ipv4_port);
-    if(ret<0){
-        printf("error fetching default config for port ipv4\n");
-    }
-    ipv4_port.event_port_cfg= RTE_EVENT_PORT_CFG_HINT_CONSUMER;
+    struct rte_event_port_conf ipv4_port = {
+        .new_event_threshold = 1024,
+        .dequeue_depth = 32,
+        .enqueue_depth = 32,
+        .event_port_cfg = RTE_EVENT_PORT_CFG_HINT_CONSUMER
+    };
 
-    struct rte_event_port_conf ipv6_port;
-    ret=rte_event_port_default_conf_get(DEV_ID, IPV6_CONS_PORT_ID, &ipv6_port);
-    if(ret<0){
-        printf("error fetching default config for port ipv6\n");
-    }
-    ipv6_port.event_port_cfg= RTE_EVENT_PORT_CFG_HINT_CONSUMER;
+    struct rte_event_port_conf ipv6_port = {
+        .new_event_threshold = 1024,
+        .dequeue_depth = 32,
+        .enqueue_depth = 32,
+        .event_port_cfg = RTE_EVENT_PORT_CFG_HINT_CONSUMER
+    };
+
+
 
     ret=rte_event_port_setup(DEV_ID, PROD_PORT_ID, &receive_port);
     if(ret<0){
@@ -251,7 +261,8 @@ int main(int argc, char** argv){
 
 
     // launch on each core
-    rte_eal_remote_launch(receive, NULL, 1);
+    rte_eal_remote_launch(receive, NULL, 4);
+    //receive(NULL);
     rte_eal_remote_launch(transmit_ipv4, NULL, 2);
     rte_eal_remote_launch(drop_ipv6, NULL, 3);
 

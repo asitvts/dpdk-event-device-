@@ -1,10 +1,16 @@
+#include <rte_launch.h>
+#include <rte_mbuf.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
-#include<unistd.h>
+#include <unistd.h>
 
 #include <rte_eal.h>
 #include <rte_eventdev.h>
 #include <rte_ethdev.h>
+
+#include "port_config.c"
+#include "parse.c"
 
 #define DEV_ID 0
 
@@ -15,6 +21,95 @@
 #define IPV4_CONS_PORT_ID 1
 #define IPV6_CONS_PORT_ID 2
 
+
+#define FIND_IP_TYPE 1
+#define PARSE_PACKET 0
+
+int receive(void* arg){
+    int num_rx;
+
+    struct rte_mbuf* buf[32];
+
+    while(1){
+        int received = rte_eth_rx_burst(0, 0, buf, 32);
+
+        if(received==0)continue;
+
+
+        for(int i=0; i<received; i++){
+            struct rte_event event={0};
+            event.event_type = RTE_EVENT_TYPE_CPU;
+            event.sched_type = RTE_SCHED_TYPE_PARALLEL;
+            event.mbuf = buf[i];  
+            
+            int ip = parsing_logic(buf[i],FIND_IP_TYPE);
+            if(ip==4){
+                event.queue_id = V4_Q_ID;
+            }
+            else{
+                event.queue_id = V6_Q_ID;
+            }
+
+            
+            if(rte_event_enqueue_burst(DEV_ID, PROD_PORT_ID, &event, 1)<=0){
+                //printf("some error while sending mbuf no %d as event\n", i);
+                //continue
+                rte_pause();
+            }
+        }
+        
+    }
+
+
+    return num_rx;
+}
+
+
+int transmit_ipv4(void* arg){
+    int num_tx;
+
+    while(1){
+
+        struct rte_event* out; 
+        if(rte_event_dequeue_burst(DEV_ID, IPV4_CONS_PORT_ID, out, 1, 0)==0){
+            //printf("some failure in dequeue of event\n");
+            //continue;
+            rte_pause();
+        }
+
+
+        struct rte_mbuf* packet = out->mbuf;
+        printf("received mbuf from ipv4 queue\n");
+        parsing_logic(packet, PARSE_PACKET);
+
+
+    }
+
+    return num_tx;
+}
+
+int drop_ipv6(void* arg){
+    int num_drops;
+
+    while(1){
+
+        struct rte_event* out; 
+        if(rte_event_dequeue_burst(DEV_ID, IPV6_CONS_PORT_ID, out, 1, 0)==0){
+            //printf("some failure in dequeue of event\n");
+            //continue;
+            rte_pause();
+        }
+
+
+        struct rte_mbuf* packet = out->mbuf;
+        printf("received mbuf from ipv6 queue, now dropping\n");
+        rte_pktmbuf_free(packet);
+
+    }
+
+
+    return num_drops;
+}
 
 int main(int argc, char** argv){
 
@@ -29,6 +124,9 @@ int main(int argc, char** argv){
     printf("initialization done\n");
 
 
+    configure_port(0,1,1);
+    
+
 
     // event device config
     struct rte_event_dev_config econfig={0};
@@ -36,7 +134,7 @@ int main(int argc, char** argv){
     econfig.nb_event_queues=2;
     econfig.nb_event_port_dequeue_depth=32;
     econfig.nb_event_port_enqueue_depth=32;
-    econfig.nb_event_queue_flows=1;     // each packet will have sche type as parallel anyway
+    econfig.nb_event_queue_flows=1024;     // each packet will have sched type as parallel anyway
 
     ret = rte_event_dev_configure(DEV_ID, &econfig);
     if(ret<0){
@@ -152,6 +250,30 @@ int main(int argc, char** argv){
     
 
 
+    // launch on each core
+    rte_eal_remote_launch(receive, NULL, 1);
+    rte_eal_remote_launch(transmit_ipv4, NULL, 2);
+    rte_eal_remote_launch(drop_ipv6, NULL, 3);
+
+
+
+    // wait for each core to finish
+    unsigned lcore_id;
+    RTE_LCORE_FOREACH_WORKER(lcore_id) {
+        rte_eal_wait_lcore(lcore_id);
+    }
+
+
+
+
+    // stop and clean 
+    rte_event_dev_stop(DEV_ID);
+    rte_event_dev_close(DEV_ID);
+    printf("closed\n");
+
+
+    rte_eal_cleanup();
+    printf("cleanup");
 
     return 0;
 }

@@ -1,5 +1,11 @@
+#include <netinet/in.h>
+#include <rte_byteorder.h>
+#include <rte_ether.h>
+#include <rte_ip4.h>
 #include <rte_launch.h>
 #include <rte_mbuf.h>
+#include <rte_mbuf_core.h>
+#include <rte_tcp.h>
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -8,6 +14,7 @@
 #include <rte_eal.h>
 #include <rte_eventdev.h>
 #include <rte_ethdev.h>
+#include <rte_hash_crc.h>
 
 #include "port_config.c"
 #include "parse.c"
@@ -25,6 +32,50 @@
 #define FIND_IP_TYPE 1
 #define PARSE_PACKET 0
 
+
+
+typedef struct{
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint8_t protocol;
+}__attribute__((packed))key_tuple;
+
+
+static void set_tuple_fields(key_tuple* key, struct rte_mbuf* packet){
+    int offset=0;
+    offset+=sizeof(struct rte_ether_hdr);
+    struct rte_ipv4_hdr* ipv4_hdr = rte_pktmbuf_mtod_offset(packet, struct rte_ipv4_hdr*, offset);
+
+    // src ip and dst ip
+    key->src_ip=rte_be_to_cpu_32(ipv4_hdr->src_addr);
+    key->dst_ip=rte_be_to_cpu_32(ipv4_hdr->dst_addr);
+
+
+    //protocol
+    key->protocol=ipv4_hdr->next_proto_id;
+
+
+    // src port and dst port
+    uint8_t ihl = ipv4_hdr->version_ihl & 0x0f;
+    uint16_t ip_hdr_len = ihl * 4;
+    offset += ip_hdr_len;
+
+    if(key->protocol==IPPROTO_TCP){
+        struct rte_tcp_hdr* tcp_hdr = rte_pktmbuf_mtod_offset(packet, struct rte_tcp_hdr*, offset);
+        key->src_port=rte_be_to_cpu_16(tcp_hdr->src_port);
+        key->dst_port=rte_be_to_cpu_16(tcp_hdr->dst_port);
+    }
+    else if(key->protocol==IPPROTO_UDP){
+        struct rte_udp_hdr* udp_hdr = rte_pktmbuf_mtod_offset(packet, struct rte_udp_hdr*, offset);
+        key->src_port=rte_be_to_cpu_16(udp_hdr->src_port);
+        key->dst_port=rte_be_to_cpu_16(udp_hdr->dst_port);
+    }
+    
+}
+
+
 int receive(void __rte_unused *arg){
     int num_rx=0;
 
@@ -40,13 +91,18 @@ int receive(void __rte_unused *arg){
         for(int i=0; i<received; i++){
             struct rte_event event={0};
             event.event_type =  RTE_EVENT_TYPE_ETHDEV;
-            event.sched_type = RTE_SCHED_TYPE_PARALLEL;
+            event.sched_type = RTE_SCHED_TYPE_ORDERED;
             event.mbuf = buf[i]; 
             event.op = RTE_EVENT_OP_NEW; 
             
             int ip = parsing_logic(buf[i],FIND_IP_TYPE);
             if(ip==4){
                 event.queue_id = V4_Q_ID;
+
+                key_tuple key={0};
+                set_tuple_fields(&key,buf[i]);
+
+                event.flow_id=(rte_hash_crc(&key, sizeof(key_tuple), 2))%1024;
             }
             else{
                 event.queue_id = V6_Q_ID;
@@ -68,7 +124,7 @@ int receive(void __rte_unused *arg){
 }
 
 
-int transmit_ipv4(void *arg){
+int transmit_ipv4(void __rte_unused *arg){
     struct rte_event out;
 
     while (1) {
@@ -81,6 +137,7 @@ int transmit_ipv4(void *arg){
         struct rte_mbuf *packet = out.mbuf;
 
         printf("received mbuf from ipv4 queue\n");
+        printf("flow id for current event(packet) is %d\n", out.flow_id);
         parsing_logic(packet, PARSE_PACKET);
         
         // release and enqueue it back (not required in parallel)
@@ -113,6 +170,7 @@ int drop_ipv6(void __rte_unused *arg){
 
         // release and queue it back (not required in parallel)
         struct rte_mbuf* packet = out.mbuf;
+        printf("flow id for current event(packet) is %d\n", out.flow_id);
         out.op=RTE_EVENT_OP_RELEASE;
         ret=rte_event_enqueue_burst(DEV_ID, IPV6_CONS_PORT_ID, &out, 1);
         if(ret<1){
@@ -127,6 +185,8 @@ int drop_ipv6(void __rte_unused *arg){
 
     return num_drops;
 }
+
+
 
 int main(int argc, char** argv){
 
@@ -164,11 +224,11 @@ int main(int argc, char** argv){
 
 
 
-
-
+    
     // queue setup
     struct rte_event_queue_conf ipv4queue={0};
-    ipv4queue.schedule_type = RTE_SCHED_TYPE_PARALLEL;
+    ipv4queue.schedule_type = RTE_SCHED_TYPE_ORDERED;
+    ipv4queue.nb_atomic_order_sequences = 5;
     ret=rte_event_queue_setup(DEV_ID, V4_Q_ID, &ipv4queue);
     if(ret<0){
         printf("error while queue setup for ipv4 queue\n");
@@ -176,6 +236,7 @@ int main(int argc, char** argv){
 
     struct rte_event_queue_conf ipv6queue={0};
     ipv6queue.schedule_type = RTE_SCHED_TYPE_PARALLEL;
+    ipv6queue.nb_atomic_order_sequences = 5;
     ret=rte_event_queue_setup(DEV_ID, V6_Q_ID, &ipv6queue);
     if(ret<0){
         printf("error while queue setup for ipv6 queue\n");
